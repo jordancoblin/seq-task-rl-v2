@@ -68,6 +68,10 @@ def parse_args():
         help="timestep to start learning")
     parser.add_argument("--train-frequency", type=int, default=10,
         help="the frequency of training")
+    parser.add_argument("--max-grad-norm", type=float, default=0.5,
+        help="the maximum norm for the gradient clipping")
+    parser.add_argument("--gradient-steps", type=int, default=1,
+        help="ow many gradient updates to do on every training step")
     args = parser.parse_args()
     # fmt: on
     return args
@@ -93,11 +97,11 @@ class QNetwork(nn.Module):
     def __init__(self, env):
         super().__init__()
         self.network = nn.Sequential(
-            nn.Linear(np.array(env.single_observation_space.shape).prod(), 120),
+            nn.Linear(np.array(env.single_observation_space.shape).prod(), 256),
             nn.ReLU(),
-            nn.Linear(120, 84),
+            nn.Linear(256, 256),
             nn.ReLU(),
-            nn.Linear(84, env.single_action_space.n),
+            nn.Linear(256, env.single_action_space.n),
         )
 
     def forward(self, x):
@@ -192,23 +196,25 @@ if __name__ == "__main__":
         # ALGO LOGIC: training.
         if global_step > args.learning_starts:
             if global_step % args.train_frequency == 0:
-                data = rb.sample(args.batch_size)
-                with torch.no_grad():
-                    target_max, _ = target_network(data.next_observations).max(dim=1)
-                    td_target = data.rewards.flatten() + args.gamma * target_max * (1 - data.dones.flatten())
-                old_val = q_network(data.observations).gather(1, data.actions).squeeze()
-                loss = F.mse_loss(td_target, old_val)
+                for _ in range(args.gradient_steps):
+                    data = rb.sample(args.batch_size)
+                    with torch.no_grad():
+                        target_max, _ = target_network(data.next_observations).max(dim=1)
+                        td_target = data.rewards.flatten() + args.gamma * target_max * (1 - data.dones.flatten())
+                    old_val = q_network(data.observations).gather(1, data.actions).squeeze()
+                    loss = F.mse_loss(td_target, old_val)
 
-                if global_step % 100 == 0:
-                    writer.add_scalar("losses/td_loss", loss, global_step)
-                    writer.add_scalar("losses/q_values", old_val.mean().item(), global_step)
-                    print("SPS:", int(global_step / (time.time() - start_time)))
-                    writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+                    if global_step % 100 == 0:
+                        writer.add_scalar("losses/td_loss", loss, global_step)
+                        writer.add_scalar("losses/q_values", old_val.mean().item(), global_step)
+                        print("SPS:", int(global_step / (time.time() - start_time)))
+                        writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
-                # optimize the model
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                    # optimize the model
+                    optimizer.zero_grad()
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(q_network.parameters(), args.max_grad_norm)
+                    optimizer.step()
 
             # update target network
             if global_step % args.target_network_frequency == 0:
